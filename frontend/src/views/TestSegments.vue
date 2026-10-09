@@ -81,7 +81,13 @@ const samples: { label: string; toolCall: ToolCall; collapsed?: boolean }[] = [
     toolCall: done({
       name: 'command__run_command',
       args: { command: 'git status --short' },
-      result: ' M src/app.py\n?? docs/report.md\n[exit_code=0, duration=230ms]',
+      result: JSON.stringify({
+        exit_code: 0,
+        duration_ms: 230,
+        timed_out: false,
+        stdout: ' M src/app.py\n?? docs/report.md\n',
+        stderr: '',
+      }, null, 2),
     }),
   },
   {
@@ -102,7 +108,13 @@ const samples: { label: string; toolCall: ToolCall; collapsed?: boolean }[] = [
       status: 'error',
       duration: 1500,
       startTime: Date.now() - 1500,
-      result: 'ERROR: file or directory not found: tests/test_missing.py\n[exit_code=4, duration=1500ms]',
+      result: JSON.stringify({
+        exit_code: 4,
+        duration_ms: 1500,
+        timed_out: false,
+        stdout: '',
+        stderr: 'ERROR: file or directory not found: tests/test_missing.py\n',
+      }, null, 2),
     },
   },
   {

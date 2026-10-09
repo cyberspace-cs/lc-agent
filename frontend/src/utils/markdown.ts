@@ -119,6 +119,65 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   return defaultLinkOpen(tokens, idx, options, env, self)
 }
 
-export function renderMarkdown(text: string): string {
+// YAML frontmatter：文件首行的 --- 块。必须首行开始、有闭合的 ---，
+// 且能解析出至少一个 key: value，才当作 frontmatter，避免误吞正文里的分隔线
+const FRONTMATTER_RE = /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+
+interface FrontmatterField {
+  key: string
+  value: string
+}
+
+function parseFrontmatterFields(block: string): FrontmatterField[] {
+  const collected: { key: string; parts: string[] }[] = []
+
+  for (const rawLine of block.split(/\r?\n/)) {
+    const line = rawLine.trim()
+    if (!line || line.startsWith('#')) continue
+
+    const keyed = /^\s/.test(rawLine) ? null : /^([A-Za-z0-9_.-]+)\s*:\s*([\s\S]*)$/.exec(rawLine)
+    if (keyed) {
+      const rest = keyed[2].trim()
+      // `>-` / `|` 这类块标量：值写在后续缩进行里
+      collected.push({ key: keyed[1], parts: /^[>|][+-]?$/.test(rest) ? [] : [rest] })
+      continue
+    }
+
+    // 缩进续行：块标量正文、列表项等，去掉列表符号后并进当前键
+    const last = collected[collected.length - 1]
+    if (last) last.parts.push(line.replace(/^-\s+/, ''))
+  }
+
+  return collected
+    .map(field => ({ key: field.key, value: field.parts.filter(Boolean).join(' ').trim() }))
+    .filter(field => field.key)
+}
+
+function renderFrontmatterCard(fields: FrontmatterField[]): string {
+  const rows = fields.map(({ key, value }) => [
+    '<div class="md-frontmatter-row">',
+    `<span class="md-frontmatter-key">${md.utils.escapeHtml(key)}</span>`,
+    `<span class="md-frontmatter-value">${md.utils.escapeHtml(value)}</span>`,
+    '</div>',
+  ].join('')).join('')
+
+  return `<div class="md-frontmatter">${rows}</div>`
+}
+
+/**
+ * 渲染 Markdown。
+ * frontmatterCard 开启时，文件首行的 YAML frontmatter 不再被当成正文
+ * （否则整块会被拼成一段、还被尾行 --- 升成二级标题），改为渲染成元信息卡片。
+ */
+export function renderMarkdown(text: string, options: { frontmatterCard?: boolean } = {}): string {
+  if (options.frontmatterCard) {
+    const match = FRONTMATTER_RE.exec(text)
+    if (match) {
+      const fields = parseFrontmatterFields(match[1])
+      if (fields.length > 0) {
+        return renderFrontmatterCard(fields) + md.render(text.slice(match[0].length))
+      }
+    }
+  }
   return md.render(text)
 }

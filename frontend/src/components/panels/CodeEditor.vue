@@ -8,7 +8,8 @@ import { EditorState, type Extension } from '@codemirror/state'
 import { EditorView } from '@codemirror/view'
 import { basicSetup } from 'codemirror'
 import { oneDark } from '@codemirror/theme-one-dark'
-import { search as searchExt, SearchQuery, setSearchQuery, getSearchQuery } from '@codemirror/search'
+import { search as searchExt, openSearchPanel } from '@codemirror/search'
+import { createSearchPanel } from './codemirror-search-panel'
 import { python } from '@codemirror/lang-python'
 import { javascript } from '@codemirror/lang-javascript'
 import { json } from '@codemirror/lang-json'
@@ -77,8 +78,8 @@ onMounted(() => {
   const langExt = languageExtension()
   const extensions: Extension[] = [
     basicSetup,
-    // search 状态必须显式启用，setSearchQuery effect 才会生效
-    searchExt(),
+    // 自定义中文搜索面板：命中计数、大小写/正则/整词、替换，Ctrl+F 唤起
+    searchExt({ top: true, createPanel: createSearchPanel }),
     ...(langExt ? [langExt] : []),
     oneDark,
     themeExt,
@@ -120,58 +121,6 @@ function jumpToLine(line: number) {
   view.focus()
 }
 
-/** 设置搜索词并返回匹配总数；后续用 gotoMatchIndex 在匹配间跳转 */
-function search(query: string): number {
-  if (!view) return 0
-  const q = new SearchQuery({ search: query, caseSensitive: false })
-  view.dispatch({ effects: setSearchQuery.of(q) })
-  const total = countMatches(view, q)
-  // 命中时先把视图落到第一个匹配上，计数与光标位置保持一致
-  if (total > 0) matchIndexAt(view, 0)
-  return total
-}
-
-/** 统计当前文档里该查询的匹配总数 */
-function countMatches(target: EditorView, query: SearchQuery): number {
-  let count = 0
-  const cursor = query.getCursor(target.state)
-  let step = cursor.next()
-  while (!step.done) {
-    count++
-    step = cursor.next()
-  }
-  return count
-}
-
-/** 把视图落到第 index 个匹配（0 起），返回匹配总数；越界或查询非法返回 0 */
-function matchIndexAt(target: EditorView, index: number): number {
-  const query = getSearchQuery(target.state)
-  if (!query.valid) return 0
-  const total = countMatches(target, query)
-  if (!total || index < 0 || index >= total) return 0
-  const cursor = query.getCursor(target.state)
-  for (let i = 0, step = cursor.next(); !step.done; step = cursor.next(), i++) {
-    if (i !== index) continue
-    const { from, to } = step.value
-    target.dispatch({
-      selection: { anchor: from, head: to },
-      effects: EditorView.scrollIntoView(from, { y: 'center' }),
-    })
-    return total
-  }
-  return 0
-}
-
-/**
- * 跳到第 index 个匹配（0 起），返回 { found, total }。
- * 环绕由调用方计算，这样「1/2」的计数与视图共用同一个下标。
- */
-function gotoMatchIndex(index: number): { found: boolean; total: number } {
-  if (!view) return { found: false, total: 0 }
-  const total = matchIndexAt(view, index)
-  return { found: total > 0, total }
-}
-
 /** 当前选区信息：文本与首尾行号（1 起）。无选区或全空白返回 null */
 function getSelectionInfo(): { text: string; startLine: number; endLine: number } | null {
   if (!view) return null
@@ -186,10 +135,14 @@ function getSelectionInfo(): { text: string; startLine: number; endLine: number 
   return { text, startLine, endLine }
 }
 
+/** 打开内置中文搜索面板（Ctrl+F / 工具栏查找按钮） */
+function openSearch() {
+  if (view) openSearchPanel(view)
+}
+
 defineExpose({
   jumpToLine,
-  search,
-  gotoMatchIndex,
+  openSearch,
   getSelectionInfo,
   focus: () => view?.focus(),
 })
@@ -237,5 +190,126 @@ defineExpose({
 
 .code-editor-host :deep(.cm-scroller)::-webkit-scrollbar-corner {
   background: transparent;
+}
+
+/* ---- 自定义搜索面板（Ctrl+F） ---- */
+.code-editor-host :deep(.cm-panels.cm-panels-top) {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.09);
+  background: transparent;
+  padding: 0;
+}
+
+.code-editor-host :deep(.lc-search-panel) {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #161b22;
+  font-size: 12px;
+  color: #e6edf3;
+}
+
+.code-editor-host :deep(.lc-search-row) {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.code-editor-host :deep(.lc-search-input) {
+  height: 28px;
+  min-width: 0;
+  flex: 0 1 280px;
+  padding: 0 10px;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  background: #0d1117;
+  color: #e6edf3;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+}
+
+.code-editor-host :deep(.lc-search-input::placeholder) {
+  color: #6e7681;
+}
+
+.code-editor-host :deep(.lc-search-input:focus) {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.15);
+}
+
+.code-editor-host :deep(.lc-search-input.is-invalid) {
+  border-color: #f87171;
+  box-shadow: 0 0 0 2px rgba(248, 113, 113, 0.15);
+}
+
+.code-editor-host :deep(.lc-search-count) {
+  min-width: 46px;
+  text-align: center;
+  color: #8b949e;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.code-editor-host :deep(.lc-search-count.is-empty) {
+  color: #f87171;
+}
+
+.code-editor-host :deep(.lc-search-btn) {
+  height: 28px;
+  min-width: 28px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #9da7b3;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.code-editor-host :deep(.lc-search-btn:hover) {
+  background: rgba(255, 255, 255, 0.08);
+  color: #e6edf3;
+}
+
+.code-editor-host :deep(.lc-search-btn.is-icon) {
+  font-size: 13px;
+}
+
+.code-editor-host :deep(.lc-search-btn.is-toggle) {
+  border-color: #30363d;
+  font-weight: 600;
+}
+
+.code-editor-host :deep(.lc-search-btn.is-monospace) {
+  font-family: 'Cascadia Code', Consolas, monospace;
+}
+
+.code-editor-host :deep(.lc-search-btn.is-toggle.is-active) {
+  border-color: rgba(56, 189, 248, 0.55);
+  background: rgba(56, 189, 248, 0.14);
+  color: #7dd3fc;
+}
+
+.code-editor-host :deep(.lc-search-btn.is-text) {
+  border-color: #30363d;
+}
+
+.code-editor-host :deep(.lc-search-close) {
+  margin-left: auto;
+  font-size: 12px;
+  color: #6e7681;
+}
+
+/* 搜索命中配色：oneDark 默认偏紫，换成与滚动条/焦点一致的天蓝，当前命中更深 */
+.code-editor-host :deep(.cm-searchMatch) {
+  background-color: rgba(56, 189, 248, 0.28);
+  outline: 1px solid rgba(56, 189, 248, 0.35);
+}
+
+.code-editor-host :deep(.cm-searchMatch-selected) {
+  background-color: rgba(56, 189, 248, 0.55);
+  outline: 1px solid #38bdf8;
 }
 </style>

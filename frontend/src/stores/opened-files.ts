@@ -17,6 +17,9 @@ export interface OpenedFile {
   pinned: boolean
 }
 
+// Markdown 标签的查看模式：预览（渲染后排版）或编辑（源码）
+export type MarkdownViewMode = 'preview' | 'edit'
+
 interface FileContent {
   code: string
   truncated: boolean
@@ -139,6 +142,9 @@ export const useOpenedFilesStore = defineStore('openedFiles', () => {
   // 已关闭标签栈，供「恢复已关闭的标签」使用（仅当前 agent 会话内有效）
   const closedStack = ref<OpenedFile[]>([])
 
+  // Markdown 标签的查看模式：只记在内存，刷新后回到默认预览
+  const mdModes = ref<Record<string, MarkdownViewMode>>({})
+
   const activeFile = computed(() => files.value.find(f => f.path === activePath.value) ?? null)
   const activeContent = computed(() => contents.value[activePath.value] ?? null)
 
@@ -151,6 +157,22 @@ export const useOpenedFilesStore = defineStore('openedFiles', () => {
     const pinned = list.filter(f => f.pinned)
     const rest = list.filter(f => !f.pinned)
     return [...pinned, ...rest]
+  }
+
+  /** markdown 标签当前是预览还是源码编辑；没记过一律预览 */
+  function markdownModeOf(path: string): MarkdownViewMode {
+    return mdModes.value[path] === 'edit' ? 'edit' : 'preview'
+  }
+
+  function setMarkdownMode(path: string, mode: MarkdownViewMode) {
+    if (!path) return
+    if (mode === 'edit') {
+      mdModes.value = { ...mdModes.value, [path]: 'edit' }
+      return
+    }
+    const next = { ...mdModes.value }
+    delete next[path]
+    mdModes.value = next
   }
 
   function emptyContent(overrides: Partial<FileContent> = {}): FileContent {
@@ -282,6 +304,7 @@ export const useOpenedFilesStore = defineStore('openedFiles', () => {
     next.splice(idx, 1)
     files.value = next
     delete contents.value[path]
+    delete mdModes.value[path]
     if (activePath.value === path) {
       const fallback = next[idx] || next[idx - 1] || null
       activePath.value = fallback ? fallback.path : ''
@@ -644,6 +667,8 @@ export const useOpenedFilesStore = defineStore('openedFiles', () => {
     contentOf,
     isImagePath,
     isDocumentPath,
+    markdownModeOf,
+    setMarkdownMode,
     open,
     activate,
     close,

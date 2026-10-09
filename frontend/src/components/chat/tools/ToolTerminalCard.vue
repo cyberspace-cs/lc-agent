@@ -4,11 +4,11 @@
       <span class="collapse-icon">{{ isCollapsed ? '▸' : '▾' }}</span>
       <span class="tt-dot" :class="dotClass"></span>
       <span class="tt-title" :title="headerFullTitle">{{ headerTitle }}</span>
-      <span v-if="exitBadge" class="tt-exit" :class="{ 'is-error': exitIsError }">{{ exitBadge }}</span>
-      <span v-else-if="toolCall.status === 'running'" class="live-timer">
+      <span v-if="toolCall.status === 'running'" class="live-timer">
         <span class="live-dot"></span>{{ liveElapsed }}
       </span>
-      <span v-else-if="toolCall.duration != null" class="meta-item">{{ formatDuration(toolCall.duration) }}</span>
+      <span v-else-if="finalElapsed" class="live-timer is-finished">{{ finalElapsed }}</span>
+      <span v-if="exitBadge" class="tt-exit" :class="{ 'is-error': exitIsError }">{{ exitBadge }}</span>
       <span v-if="toolCall.status === 'done' && resultSizeText" class="meta-item" title="命令输出大小（字符 / 估算 token）">
         📦 {{ resultSizeText }}<template v-if="tokenText"> | {{ tokenText }}</template>
       </span>
@@ -111,12 +111,26 @@ const followBottom = ref(true)
 const toolName = computed(() => props.toolCall.name || '')
 const toolNameText = computed(() => props.toolCall.name || '(未知工具)')
 
+// 命令行工具的最终结果是 JSON 对象（run_command / skill__execute_script / 后台进程系列）；
+// 流式期间 streamingOutput 是裸文本，不参与解析。
+const parsedResult = computed<Record<string, any> | null>(() => {
+  if (props.toolCall.streamingOutput) return null
+  const text = (props.toolCall.result || '').trim()
+  if (!text.startsWith('{')) return null
+  try {
+    const parsed = JSON.parse(text)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+})
+
 const commandText = computed(() => {
   const args = props.toolCall.args || {}
   if (typeof args.command === 'string' && args.command) return args.command
-  // kill / read 只有 pid，把 result 里的 Command 行捞出来当标题
-  const m = (props.toolCall.result || '').match(/^Command:\s*(.+)$/m)
-  if (m) return m[1].trim()
+  // kill / read 只有 pid：优先从 JSON 结果里拿 command，其次用 pid 当标题
+  const parsed = parsedResult.value
+  if (parsed?.command) return String(parsed.command)
   if (args.pid != null) return `PID ${args.pid}`
   return ''
 })
@@ -170,66 +184,41 @@ function normalizeResult(value?: string): string {
   return value.replace(/\\u3000/g, '　').replace(/\\n/g, '\n')
 }
 
-// skill__execute_script 返回 "exit_code: N\nduration_ms: N\n\nstdout:\n..\n\nstderr:\n.."，
-// 这里转成 run_command 的 "正文 + [stderr] 段 + [exit_code=N, duration=Nms]" 形式，
-// 复用下面的输出渲染与退出码解析逻辑。
-function fromSkillResult(text: string): string {
-  const head = text.match(/^exit_code:\s*(-?\d+|None)\s*\nduration_ms:\s*(\d+)\s*\n/)
-  if (!head) return text
-  let rest = text.slice(head[0].length)
-  let timedOut = false
-  if (rest.startsWith('timed_out: true\n')) {
-    timedOut = true
-    rest = rest.slice('timed_out: true\n'.length)
-  }
-  const stdoutIdx = rest.indexOf('stdout:\n')
-  if (stdoutIdx < 0) return text
-  rest = rest.slice(stdoutIdx + 'stdout:\n'.length)
-  let stdoutBody = rest
-  let stderrBody = ''
-  const stderrIdx = rest.indexOf('\n\nstderr:\n')
-  if (stderrIdx >= 0) {
-    stdoutBody = rest.slice(0, stderrIdx)
-    stderrBody = rest.slice(stderrIdx + '\n\nstderr:\n'.length)
-  }
-  stdoutBody = stdoutBody.replace(/\n+$/, '')
-  stderrBody = stderrBody.replace(/\n+$/, '')
-  const code = head[1] === 'None' ? -1 : Number(head[1])
-  const parts: string[] = []
-  if (stdoutBody) parts.push(stdoutBody)
-  if (stderrBody && stderrBody !== '(empty)') parts.push(`[stderr]\n${stderrBody}`)
-  parts.push(
-    timedOut
-      ? `[Command timed out after ${head[2]}ms, process killed]`
-      : `[exit_code=${code}, duration=${head[2]}ms]`,
-  )
-  return parts.join('\n\n')
-}
-
 const rawOutput = computed(() => {
   const tc = props.toolCall
-  const text = fromSkillResult(normalizeResult(tc.streamingOutput || tc.result || ''))
-  // 后台进程返回头 "PID:..\nStatus:..\nCommand:..\n---\n正文"：只显示正文
-  const sepIdx = text.indexOf('\n---\n')
-  if ((toolName.value.endsWith('__start_background_process') || toolName.value.endsWith('__read_process_output'))
-    && (text.startsWith('PID:') && sepIdx >= 0)) {
-    return text.slice(sepIdx + 5)
+  if (tc.streamingOutput) return normalizeResult(tc.streamingOutput)
+  const parsed = parsedResult.value
+  if (parsed) {
+    const parts: string[] = []
+    const body = parsed.output ?? parsed.stdout ?? parsed.detail ?? ''
+    if (body) parts.push(String(body))
+    if (parsed.stderr) parts.push(`[stderr]\n${String(parsed.stderr)}`)
+    return parts.join('\n')
   }
-  return text
+  return normalizeResult(tc.result || '')
 })
 
 const exitInfo = computed(() => {
-  const text = rawOutput.value
-  const m = text.match(/\[exit_code=(-?\d+),\s*duration=(\d+)ms\]\s*$/)
-  if (m) return { code: Number(m[1]), durationMs: Number(m[2]), timedOut: false }
-  const t = text.match(/\[Command timed out after (\d+)ms, process killed\]\s*$/)
-  if (t) return { code: -1, durationMs: Number(t[1]), timedOut: true }
+  const parsed = parsedResult.value
+  if (parsed && (parsed.exit_code != null || parsed.timed_out)) {
+    return {
+      code: parsed.exit_code ?? -1,
+      durationMs: Number(parsed.duration_ms) || 0,
+      timedOut: !!parsed.timed_out,
+    }
+  }
   return null
 })
 
 const exitIsError = computed(() => {
   if (props.toolCall.status === 'error') return true
   return exitInfo.value != null && (exitInfo.value.timedOut || exitInfo.value.code !== 0)
+})
+
+// 计时结束后把最终耗时留在头部，避免倒计时一停数字就消失
+const finalElapsed = computed(() => {
+  if (props.toolCall.status === 'running') return ''
+  return formatDuration(props.toolCall.duration)
 })
 
 const exitBadge = computed(() => {
@@ -351,7 +340,16 @@ function stopBgPolling(): void {
   if (tc.bgProcessRunning) {
     tc.bgProcessRunning = false
     if (tc.streamingOutput) {
-      tc.result = (tc.result ? `${tc.result}\n` : '') + tc.streamingOutput
+      // 结果是 JSON：把轮询到的输出并入 stdout 字段，保持可解析
+      let merged: string
+      try {
+        const parsed = JSON.parse(tc.result || '{}')
+        parsed.stdout = `${parsed.stdout || ''}${tc.streamingOutput}`
+        merged = JSON.stringify(parsed, null, 2)
+      } catch {
+        merged = (tc.result ? `${tc.result}\n` : '') + tc.streamingOutput
+      }
+      tc.result = merged
       tc.resultLength = tc.result.length
       delete tc.streamingOutput
     }
@@ -486,6 +484,13 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: var(--el-color-primary);
   animation: tt-pulse 1s ease-in-out infinite;
+}
+
+/* 计时结束后的静态耗时：与倒计时同位置同尺寸，去掉蓝色高亮改成中性灰 */
+.live-timer.is-finished {
+  color: #8b949e;
+  background: rgba(139, 148, 158, 0.12);
+  border-color: rgba(139, 148, 158, 0.3);
 }
 
 .meta-item {

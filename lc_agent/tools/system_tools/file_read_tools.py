@@ -296,6 +296,9 @@ def _search_files_by_content(
     context_lines: int,
 ) -> str:
     cmd = [rg_path, "--line-number", "--no-heading"]
+    # 压缩后的单行文件（如 .min.js）一行可达数十万字符，按行数截断挡不住。
+    # 限制列宽让 rg 直接弃掉超长行，只保留「文件:行号」定位，避免整行灌进对话上下文。
+    cmd.extend(["--max-columns", "1000", "--max-columns-preview"])
     if ignore_case:
         cmd.append("--ignore-case")
     if context_lines > 0:
@@ -331,8 +334,13 @@ def _run_rg(cmd: list[str], max_results: int) -> str:
 
     output = result.stdout
     lines = output.splitlines()
-    if len(lines) > max_results * 5:
-        output = "\n".join(lines[:max_results * 5])
-        output += f"\n\n... [output truncated, showing first {max_results * 5} lines]"
+    keep = max_results * 5
+    if len(lines) > keep:
+        omitted = len(lines) - keep
+        output = "\n".join(lines[:keep])
+        output += (
+            f"\n\n... [output truncated: showing first {keep} of {len(lines)} lines, "
+            f"{omitted} more lines omitted — narrow the pattern or path to see the rest]"
+        )
 
     return output

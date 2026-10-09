@@ -1,3 +1,4 @@
+import json
 import os
 import platform
 import re
@@ -43,6 +44,11 @@ class _ProcessEntry:
             all_lines = self.stdout_buf[offset:]
             new_offset = len(self.stdout_buf)
         return "".join(all_lines), new_offset
+
+    def get_output_parts(self) -> tuple[str, str]:
+        """Return buffered stdout and stderr separately."""
+        with self._lock:
+            return "".join(self.stdout_buf), "".join(self.stderr_buf)
 
     def get_full_output(self) -> str:
         with self._lock:
@@ -186,7 +192,8 @@ def run_command(
     You must first verify that your command is safe — never execute dangerous commands.
     Generate commands according to the user’s operating system — do not execute Linux-syntax commands on Windows.
     
-    Execute a one-shot command and wait for it to finish; returns the full combined output. The process is force-killed on timeout.
+    Execute a one-shot command and wait for it to finish. The process is force-killed on timeout.
+    Returns a JSON object: {"exit_code": int, "duration_ms": int, "timed_out": bool, "stdout": str, "stderr": str}.
 
     Uses PowerShell (-NoProfile -Command) on Windows and $SHELL (default: /bin/sh) on Linux/macOS.
     WARNING (Windows PowerShell 5.1): '&&' is not supported. Chain dependent commands with 'cmd1; if ($?) { cmd2 }' instead.
@@ -329,28 +336,24 @@ def run_command(
 
     elapsed_ms = int((time.time() - start) * 1000)
 
-    if timed_out:
-        parts = [f"{''.join(stdout_lines)}"]
-        if stderr_lines:
-            parts.append(f"[stderr]\n{''.join(stderr_lines)}")
-        parts.append(f"[Command timed out after {elapsed_ms}ms, process killed]")
-        return "\n".join(parts)
-
-    parts: list[str] = []
-    if stdout_lines:
-        parts.append("".join(stdout_lines))
-    if stderr_lines:
-        parts.append(f"[stderr]\n{''.join(stderr_lines)}")
-
-    status = f"[exit_code={proc.returncode}, duration={elapsed_ms}ms]"
-    parts.append(status)
-
-    output = "\n".join(parts)
     max_output = 50000
-    if len(output) > max_output:
-        output = output[:max_output] + f"\n\n... [output truncated at {max_output} chars]"
 
-    return output
+    def _field(text: str) -> str:
+        if len(text) > max_output:
+            return text[:max_output] + f"\n[truncated: showing first {max_output} of {len(text)} characters]"
+        return text
+
+    return json.dumps(
+        {
+            "exit_code": proc.returncode,
+            "duration_ms": elapsed_ms,
+            "timed_out": timed_out,
+            "stdout": _field("".join(stdout_lines)),
+            "stderr": _field("".join(stderr_lines)),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 def _emit_process_info(pid: int, command: str) -> None:
@@ -383,7 +386,8 @@ def _emit_output_chunk(content: str) -> None:
 
 @tool(group="command", group_description="命令执行")
 def list_all_processes() -> str:
-    """List all currently running system processes with their PID, name, and memory usage. Limited to the first 100 results."""
+    """List all currently running system processes with their PID, name, and memory usage. Limited to the first 100 results.
+    Returns a JSON object: {"count": int, "truncated": bool, "processes": [...]}."""
     system = platform.system()
     try:
         if system == "Windows":
@@ -394,14 +398,24 @@ def list_all_processes() -> str:
             if result.returncode != 0:
                 return f"Error: tasklist failed: {result.stderr}"
             lines = result.stdout.strip().splitlines()
-            output_lines = ["PID\tName\tMemory"]
+            processes = []
             for line in lines[:100]:
                 parts = [p.strip('"') for p in line.split('","')]
                 if len(parts) >= 5:
-                    output_lines.append(f"{parts[1]}\t{parts[0]}\t{parts[4]}")
-            if len(lines) > 100:
-                output_lines.append(f"... [{len(lines) - 100} more processes not shown]")
-            return "\n".join(output_lines)
+                    try:
+                        pid = int(parts[1])
+                    except ValueError:
+                        continue
+                    processes.append({"pid": pid, "name": parts[0], "memory": parts[4]})
+            return json.dumps(
+                {
+                    "count": len(processes),
+                    "truncated": len(lines) > 100,
+                    "processes": processes,
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
         else:
             result = subprocess.run(
                 ["ps", "aux", "--sort=-rss"],
@@ -410,35 +424,49 @@ def list_all_processes() -> str:
             if result.returncode != 0:
                 return f"Error: ps failed: {result.stderr}"
             lines = result.stdout.strip().splitlines()
-            if len(lines) > 101:
-                return "\n".join(lines[:101]) + f"\n... [{len(lines) - 101} more processes]"
-            return result.stdout
+            return json.dumps(
+                {
+                    "count": min(len(lines), 100),
+                    "truncated": len(lines) > 100,
+                    "processes": lines[:100],
+                },
+                ensure_ascii=False,
+                indent=2,
+            )
     except Exception as e:
         return f"Error listing processes: {e}"
 
 
 @tool(group="command", group_description="命令执行")
 def list_agent_started_processes() -> str:
-    """List all background processes started by start_background_process that are currently tracked in this session."""
+    """List all background processes started by start_background_process that are currently tracked in this session.
+    Returns a JSON object: {"count": int, "processes": [{"pid": int, "status": str, "running_for_s": int, "command": str}]}."""
     _reap_exited_processes()
 
     if not _processes:
-        return "No tracked background processes."
+        return json.dumps({"count": 0, "processes": []}, ensure_ascii=False, indent=2)
 
-    lines = ["PID\tStatus\tRunning For\tCommand"]
+    processes = []
     for pid, entry in _processes.items():
         is_running = entry.proc.poll() is None
-        status = "running" if is_running else f"exited({entry.proc.returncode})"
-        elapsed = time.time() - entry.start_time
-        lines.append(f"{pid}\t{status}\t{elapsed:.0f}s\t{entry.command}")
-    return "\n".join(lines)
+        status = "running" if is_running else f"exited (code={entry.proc.returncode})"
+        processes.append(
+            {
+                "pid": pid,
+                "status": status,
+                "running_for_s": int(time.time() - entry.start_time),
+                "command": entry.command,
+            }
+        )
+    return json.dumps({"count": len(processes), "processes": processes}, ensure_ascii=False, indent=2)
 
 
 @tool(group="command", group_description="命令执行")
 def kill_process(
     pid: Annotated[int, "PID of the process to terminate"],
 ) -> str:
-    """Terminate a process by its PID using SIGKILL on Linux/macOS or taskkill /F on Windows."""
+    """Terminate a process by its PID using SIGKILL on Linux/macOS or taskkill /F on Windows.
+    Returns a JSON object: {"pid": int, "killed": bool, "detail": str}."""
     try:
         if platform.system() == "Windows":
             result = subprocess.run(
@@ -458,7 +486,11 @@ def kill_process(
         return f"Error killing process {pid}: {e}"
 
     _processes.pop(pid, None)
-    return f"Process {pid} terminated"
+    return json.dumps(
+        {"pid": pid, "killed": True, "detail": f"Process {pid} terminated"},
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 @tool(group="command", group_description="命令执行")
@@ -474,7 +506,8 @@ def start_background_process(
     ] = None,
 ) -> str:
     """
-    Start a long-running process in the background and return its PID with initial output.
+    Start a long-running process in the background.
+    Returns a JSON object: {"pid": int, "status": str, "exit_code": int|null, "command": str, "stdout": str, "stderr": str} with initial output.
     Generate commands according to the user’s operating system — do not execute Linux-syntax commands on Windows.
 
     Use for: Flask/Django/FastAPI servers, Celery workers, webpack dev servers, or any daemon that doesn't exit on its own.
@@ -556,22 +589,27 @@ def start_background_process(
     if new_lines:
         _emit_output_chunk("".join(new_lines))
 
-    initial_output = entry.get_full_output()
+    initial_stdout, initial_stderr = entry.get_output_parts()
     is_running = proc.poll() is None
 
     if is_running:
         status = "running"
-    elif "[Process terminated by user]" in initial_output:
+    elif "[Process terminated by user]" in initial_stdout:
         status = "terminated by user"
     else:
         status = f"exited (code={proc.returncode})"
 
-    return (
-        f"PID: {proc.pid}\n"
-        f"Status: {status}\n"
-        f"Command: {command}\n"
-        f"---\n"
-        f"{initial_output}"
+    return json.dumps(
+        {
+            "pid": proc.pid,
+            "status": status,
+            "exit_code": None if is_running else proc.returncode,
+            "command": command,
+            "stdout": initial_stdout,
+            "stderr": initial_stderr,
+        },
+        ensure_ascii=False,
+        indent=2,
     )
 
 
@@ -583,7 +621,8 @@ def read_process_output(
         "Number of tail lines to return (default 50). Set 0 to return all buffered output.",
     ] = 50,
 ) -> str:
-    """Read buffered stdout/stderr from a tracked background process. Returns process status and recent output."""
+    """Read buffered stdout/stderr from a tracked background process.
+    Returns a JSON object: {"pid": int, "status": str, "running_for_s": number, "command": str, "output": str}."""
     entry = _processes.get(pid)
     if entry is None:
         return f"Error: No tracked background process with PID {pid}. Use start_background_process to start one."
@@ -599,11 +638,14 @@ def read_process_output(
             full_output = "\n".join(lines[-tail:])
             full_output = f"... [{len(lines) - tail} earlier lines omitted]\n{full_output}"
 
-    return (
-        f"PID: {pid}\n"
-        f"Status: {status}\n"
-        f"Running for: {elapsed:.1f}s\n"
-        f"Command: {entry.command}\n"
-        f"---\n"
-        f"{full_output}"
+    return json.dumps(
+        {
+            "pid": pid,
+            "status": status,
+            "running_for_s": round(elapsed, 1),
+            "command": entry.command,
+            "output": full_output,
+        },
+        ensure_ascii=False,
+        indent=2,
     )

@@ -23,6 +23,44 @@
         </span>
       </template>
     </div>
+    <div
+      v-if="chatSearchOpen"
+      class="chat-search-pop"
+      @pointerdown.stop
+    >
+      <input
+        ref="chatSearchInputRef"
+        v-model="chatSearchQuery"
+        class="chat-search-input"
+        type="text"
+        placeholder="搜索已加载的消息…"
+        title="仅搜索当前已加载的消息；更早的消息请先上滚加载"
+        @keydown="onChatSearchEnter"
+        @keydown.esc.prevent="closeChatSearch()"
+      >
+      <span
+        class="chat-search-count"
+        :class="{ 'is-empty': !!chatSearchQuery.trim() && !chatMatchCount }"
+      >{{ chatMatchLabel }}</span>
+      <button
+        class="chat-search-btn"
+        type="button"
+        title="上一个 (Shift+Enter)"
+        @click="chatPrevMatch()"
+      >↑</button>
+      <button
+        class="chat-search-btn"
+        type="button"
+        title="下一个 (Enter)"
+        @click="chatNextMatch()"
+      >↓</button>
+      <button
+        class="chat-search-btn chat-search-close"
+        type="button"
+        title="关闭 (Esc)"
+        @click="closeChatSearch()"
+      >✕</button>
+    </div>
     <div ref="messagesContainerRef" class="messages-container">
       <Thinking
         v-if="isHistoryLoading"
@@ -373,6 +411,8 @@ import TokenUsagePanel from '@/components/chat/TokenUsagePanel.vue'
 import RoundFileChangesCard from '@/components/chat/RoundFileChangesCard.vue'
 import MessageToolbar from '@/components/chat/MessageToolbar.vue'
 import CodeBlockModal from '@/components/chat/CodeBlockModal.vue'
+import { useDesktopMode } from '@/stores/desktop'
+import { useDomSearch } from '@/composables/useDomSearch'
 
 const LOAD_OLDER_REVEAL_THRESHOLD = 24
 
@@ -454,6 +494,7 @@ type ChatBubbleItem = MessageBubbleItem | LoadOlderBubbleItem | TimeSeparatorIte
 const chatStore = useChatStore()
 const sessionsStore = useSessionsStore()
 const chatUiState = useChatUiStateStore()
+const desktopStore = useDesktopMode()
 const sessionTabsStore = useSessionTabsStore()
 const agentsStore = useAgentsStore()
 const toolsStore = useToolsStore()
@@ -464,6 +505,57 @@ const editingContent = ref('')
 const editingAttachments = ref<Attachment[]>([])
 const messagesContainerRef = ref<HTMLElement | null>(null)
 const showLoadOlderMessages = ref(false)
+
+// ---- 聊天区内查找（desktop 下 Ctrl+F 浮层；只标记已加载消息的可见 DOM）----
+const {
+  open: chatSearchOpen,
+  query: chatSearchQuery,
+  inputRef: chatSearchInputRef,
+  matchCount: chatMatchCount,
+  label: chatMatchLabel,
+  openSearch: openChatSearchRaw,
+  closeSearch: closeChatSearch,
+  goNext: chatNextMatch,
+  goPrev: chatPrevMatch,
+} = useDomSearch(() => messagesContainerRef.value, { observe: true })
+
+function chatSearchPrefill(): string {
+  const text = (window.getSelection()?.toString() ?? '').trim().replace(/\s+/g, ' ')
+  return text.length <= 80 ? text : ''
+}
+
+function openChatSearch() {
+  openChatSearchRaw(chatSearchPrefill())
+}
+
+function onChatSearchEnter(e: KeyboardEvent) {
+  if (e.key !== 'Enter') return
+  e.preventDefault()
+  if (e.shiftKey) chatPrevMatch()
+  else chatNextMatch()
+}
+
+// 与文件面板同一套规则：desktop 统一拦截并按焦点所在区域分流；浏览器模式让浏览器原生查找上
+function onChatSearchKeydown(e: KeyboardEvent) {
+  if (!desktopStore.isDesktop || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'f') return
+  const target = e.target as HTMLElement | null
+  if (target?.classList.contains('chat-search-input')) return
+  // 焦点在 body 时按最近点击区域仲裁：点过文件面板就不抢
+  const inChat = !!target?.closest('.chat-view')
+    || (target === document.body && document.body.dataset.searchPane !== 'file')
+  if (!inChat) return
+  e.preventDefault()
+  openChatSearch()
+}
+
+// 记录最近点击区域落在聊天区（供焦点为 body 时与文件面板仲裁 Ctrl+F）
+function onChatPointerDown(e: MouseEvent) {
+  const t = e.target
+  if (t instanceof Element && t.closest('.chat-view')) {
+    document.body.dataset.searchPane = 'chat'
+  }
+}
+
 const codeModalVisible = ref(false)
 const codeModalSource = ref('')
 const codeModalLanguage = ref('')
@@ -1443,6 +1535,8 @@ function injectScrollbarStyle() {
 
 onMounted(() => {
   document.addEventListener('click', handleMarkdownClick)
+  window.addEventListener('keydown', onChatSearchKeydown, true)
+  window.addEventListener('pointerdown', onChatPointerDown, true)
   injectScrollbarStyle()
   nextTick(() => {
     applyAlwaysScrollbar()
@@ -1471,8 +1565,16 @@ watch([messages, bubbleList], async () => {
   bindScrollerListener()
 })
 
+// 切换会话（含进/出子会话）：收起查找并清高亮
+watch(
+  () => `${sessionsStore.currentSessionId}|${sessionsStore.effectiveThreadId}`,
+  () => closeChatSearch(),
+)
+
 onBeforeUnmount(() => {
   document.removeEventListener('click', handleMarkdownClick)
+  window.removeEventListener('keydown', onChatSearchKeydown, true)
+  window.removeEventListener('pointerdown', onChatPointerDown, true)
   boundScrollerEl?.removeEventListener('scroll', handleMessagesScroll)
   boundScrollerEl = null
 })
@@ -1480,12 +1582,78 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .chat-view {
+  position: relative;
   flex: 1;
   display: flex;
   flex-direction: column;
   overflow: hidden;
   height: 100%;
   min-height: 0;
+}
+
+/* 聊天区查找浮层（Ctrl+F），定位在消息区右上角，不顶推布局 */
+.chat-search-pop {
+  position: absolute;
+  top: 38px;
+  right: 24px;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 5px 6px 5px 10px;
+  background: var(--el-bg-color-overlay, #1f2430);
+  border: 1px solid var(--el-border-color, #3a3f4b);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.28);
+}
+.chat-search-input {
+  width: 190px;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--el-text-color-primary);
+  font-size: 13px;
+}
+.chat-search-input::placeholder {
+  color: var(--el-text-color-placeholder);
+}
+.chat-search-count {
+  min-width: 34px;
+  text-align: center;
+  font-size: 12px;
+  color: var(--el-text-color-secondary);
+  user-select: none;
+}
+.chat-search-count.is-empty {
+  color: var(--el-color-danger);
+}
+.chat-search-btn {
+  width: 24px;
+  height: 24px;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--el-text-color-regular);
+  font-size: 13px;
+  cursor: pointer;
+}
+.chat-search-btn:hover {
+  background: var(--el-fill-color-light, rgba(255, 255, 255, 0.08));
+  color: var(--el-text-color-primary);
+}
+.chat-search-close {
+  color: var(--el-text-color-secondary);
+}
+
+.messages-container :deep(mark.code-search-hit) {
+  background: rgba(56, 189, 248, 0.32);
+  color: inherit;
+  border-radius: 2px;
+  padding: 0;
+}
+.messages-container :deep(mark.code-search-hit.is-active) {
+  background: #38bdf8;
+  color: #0b1220;
 }
 
 .subagent-breadcrumb {

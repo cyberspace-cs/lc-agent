@@ -929,9 +929,15 @@ export const useChatStore = defineStore('chat', () => {
             tc.duration = tc.startTime ? Date.now() - tc.startTime : undefined
           }
           tc.resultLength = msg.result?.length || 0
+          let resultStatus: unknown
+          try {
+            resultStatus = JSON.parse(msg.result || '').status
+          } catch {
+            resultStatus = undefined
+          }
           const isBgRunning = tc.name === 'command__start_background_process'
             && tc.pid
-            && msg.result?.includes('Status: running')
+            && resultStatus === 'running'
           if (isBgRunning) {
             tc.bgProcessRunning = true
           } else {

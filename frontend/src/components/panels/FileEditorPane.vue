@@ -231,20 +231,46 @@
         </button>
       </div>
 
-      <!-- 工具栏：搜索 + 保存 + 复制。图片/文档不参与搜索复制，整条工具栏隐藏 -->
-      <div v-if="!isImageFile && !isDocumentFile" class="editor-toolbar">
-        <input
-          ref="searchInputRef"
-          v-model="searchQuery"
-          class="editor-search-input"
-          type="text"
-          placeholder="搜索关键字..."
-          @keydown.enter.prevent="jumpToNextMatch"
-        />
-        <div class="editor-search-actions">
-          <span v-if="searchQuery" class="editor-search-count">{{ activeMatchLabel }}</span>
-          <button class="editor-search-btn" :disabled="!matchCount" @click="jumpToPrevMatch">↑</button>
-          <button class="editor-search-btn" :disabled="!matchCount" @click="jumpToNextMatch">↓</button>
+      <!-- 工具栏：查找 + 保存 + 复制。图片不显示整条工具栏；文档（docx/xlsx/pptx）只显示查找 -->
+      <div v-if="!isImageFile" class="editor-toolbar">
+        <button
+          v-if="canSearchFile"
+          class="editor-search-toggle-btn"
+          type="button"
+          title="查找 (Ctrl+F)"
+          @click="openSearch"
+        >
+          <svg viewBox="0 0 16 16" aria-hidden="true">
+            <circle cx="7" cy="7" r="4.6" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            <path d="M10.6 10.6L14 14" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+          </svg>
+          <span>查找</span>
+        </button>
+        <!-- Markdown 预览/编辑切换：预览看渲染排版，编辑改源码 -->
+        <div
+          v-if="store.activeFile?.asMarkdown && content?.editable"
+          class="editor-md-toggle"
+          role="group"
+          aria-label="Markdown 查看模式"
+        >
+          <button
+            class="editor-md-toggle-btn"
+            :class="{ 'is-active': !mdEditMode }"
+            type="button"
+            :aria-pressed="!mdEditMode"
+            @click="setMdMode('preview')"
+          >
+            预览
+          </button>
+          <button
+            class="editor-md-toggle-btn"
+            :class="{ 'is-active': mdEditMode }"
+            type="button"
+            :aria-pressed="mdEditMode"
+            @click="setMdMode('edit')"
+          >
+            编辑
+          </button>
         </div>
         <!-- 保存：可编辑文件才出现 -->
         <button
@@ -261,14 +287,35 @@
           </svg>
           <span>{{ content?.saving ? '保存中…' : content?.dirty ? '保存' : '已保存' }}</span>
         </button>
-        <button class="editor-copy-btn" type="button" @click="copyCode">{{ copyLabel }}</button>
-        <button class="editor-locate-btn" type="button" title="在文件树中定位当前文件" @click="revealActiveInTree">
+        <button v-if="!isDocumentFile" class="editor-copy-btn" type="button" @click="copyCode">{{ copyLabel }}</button>
+        <button v-if="!isDocumentFile" class="editor-locate-btn" type="button" title="在文件树中定位当前文件" @click="revealActiveInTree">
           <svg viewBox="0 0 16 16" aria-hidden="true">
             <path d="M2 3.5h5l1.2 1.5H14v7.5H2z" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"/>
             <circle cx="8" cy="8.5" r="2.4" fill="none" stroke="currentColor" stroke-width="1.4"/>
           </svg>
           <span>定位</span>
         </button>
+      </div>
+
+      <!-- DOM 查找条：Markdown 预览 / 只读代码 / docx·xlsx·pptx 预览专用（CodeMirror 文件走它自己的面板） -->
+      <div v-if="domSearchOpen" class="editor-domsearch-bar">
+        <input
+          ref="domSearchInputRef"
+          v-model="searchQuery"
+          class="editor-search-input"
+          type="text"
+          placeholder="在当前文件中查找..."
+          @keydown.enter.prevent="jumpToNextMatch"
+          @keydown.shift.enter.prevent="jumpToPrevMatch"
+          @keydown.f3.prevent="jumpToNextMatch"
+          @keydown.esc.prevent="closeDomSearch"
+        />
+        <div class="editor-search-actions">
+          <span class="editor-search-count">{{ activeMatchLabel }}</span>
+          <button class="editor-search-btn" :disabled="!matchCount" @click="jumpToPrevMatch" title="上一个 (Shift+Enter)">↑</button>
+          <button class="editor-search-btn" :disabled="!matchCount" @click="jumpToNextMatch" title="下一个 (Enter)">↓</button>
+          <button class="editor-search-btn" @click="closeDomSearch" title="关闭 (Esc)">✕</button>
+        </div>
       </div>
 
       <!-- 保存错误提示（如乐观锁冲突） -->
@@ -325,7 +372,7 @@
       </div>
 
       <!-- 文档预览：pdf/docx/xlsx/pptx，只读，渲染组件按格式动态加载 -->
-      <div v-else-if="content?.document" class="editor-document">
+      <div v-else-if="content?.document" ref="docRenderRef" class="editor-document">
         <component
           :is="docComponent"
           v-if="docComponent && docBuffer"
@@ -374,9 +421,9 @@
           }"
           aria-hidden="true"
         />
-        <!-- Markdown 渲染 -->
+        <!-- Markdown 预览：渲染后的排版；编辑态走下方 CodeMirror -->
         <div
-          v-if="store.activeFile.asMarkdown"
+          v-if="mdPreviewMode"
           ref="renderRef"
           class="editor-markdown markdown-body"
           v-html="renderedHtml"
@@ -409,7 +456,7 @@
           @contextmenu.prevent
         >
           <button class="code-ctx-item" role="menuitem" @click="copySelection">复制</button>
-          <template v-if="store.activeFile.sourcePath && !store.activeFile.asMarkdown">
+          <template v-if="store.activeFile.sourcePath && !mdPreviewMode">
             <button class="code-ctx-item" role="menuitem" @click="copyLineRef">复制行号</button>
             <button class="code-ctx-item" role="menuitem" @click="copyLineRefWithContent">复制行号和内容</button>
           </template>
@@ -436,13 +483,16 @@ import { useOpenedFilesStore } from '@/stores/opened-files'
 import type { OpenedFile } from '@/stores/opened-files'
 import { useProjectTreeStore } from '@/stores/project-tree'
 import { useUiStore } from '@/stores/ui'
+import { useDesktopMode } from '@/stores/desktop'
 import FileTypeIcon from '@/components/common/FileTypeIcon.vue'
 import CodeEditor from '@/components/panels/CodeEditor.vue'
 import { documentErrorMessage } from '@/components/panels/documentPreviewError'
+import { useDomSearch } from '@/composables/useDomSearch'
 
 const store = useOpenedFilesStore()
 const treeStore = useProjectTreeStore()
 const uiStore = useUiStore()
+const desktopStore = useDesktopMode()
 
 const content = computed(() => store.activeContent)
 const codeEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
@@ -451,6 +501,20 @@ const codeEditorRef = ref<InstanceType<typeof CodeEditor> | null>(null)
 function onCodeChange(next: string) {
   if (!store.activePath) return
   store.markDirty(store.activePath, next)
+}
+
+// ---- Markdown 预览 / 编辑 ----
+// 默认预览；切到编辑态后由 CodeMirror 承担输入，保存走同一套 markDirty → save
+const mdEditMode = computed(
+  () => !!store.activeFile?.asMarkdown && store.markdownModeOf(store.activeFile.path) === 'edit',
+)
+const mdPreviewMode = computed(() => !!store.activeFile?.asMarkdown && !mdEditMode.value)
+// 真正由 CodeMirror 渲染的时刻：可编辑文本文件，且不在 md 预览态
+const codeEditorMode = computed(() => !!content.value?.editable && !mdPreviewMode.value)
+
+function setMdMode(mode: 'preview' | 'edit') {
+  const path = store.activePath
+  if (path) store.setMarkdownMode(path, mode)
 }
 
 async function saveActiveFile() {
@@ -519,9 +583,17 @@ watch(() => store.activePath, () => {
 })
 
 // ---- 文档只读预览（pdf/docx/xlsx/pptx） ----
-// 文档同样不参与搜索与复制，工具栏整条隐藏
 const isDocumentFile = computed(() =>
   !!store.activeFile && (store.isDocumentPath(store.activeFile.path) || !!content.value?.document),
+)
+
+// pdf / xlsx / pptx 是 canvas 渲染，DOM 文本搜索对它们无效；只有 docx 是纯 DOM，可以搜
+const isCanvasDocument = computed(
+  () => !!content.value?.document && content.value.documentKind !== 'docx',
+)
+// 可查找的文件：文本（编辑/只读）+ Markdown 预览 + docx；图片、pdf/xlsx/pptx、二进制除外
+const canSearchFile = computed(
+  () => !!content.value?.loaded && !isImageFile.value && !isCanvasDocument.value && !content.value.binary,
 )
 
 // 预览组件按格式懒加载：pdf/excel 打包体积大，不打开文档就不进主 bundle
@@ -664,6 +736,7 @@ watch(() => store.activePath, (path) => {
 
 // ---- 渲染 ----
 const renderRef = ref<HTMLElement | null>(null)
+const docRenderRef = ref<HTMLElement | null>(null)
 const contentWrapRef = ref<HTMLElement | null>(null)
 
 const lineNumbers = computed(() => {
@@ -674,7 +747,7 @@ const lineNumbers = computed(() => {
 
 const renderedHtml = computed(() => {
   if (!content.value) return ''
-  if (store.activeFile?.asMarkdown) return renderMarkdown(content.value.code)
+  if (store.activeFile?.asMarkdown) return renderMarkdown(content.value.code, { frontmatterCard: true })
   const lang = store.activeFile?.language?.toLowerCase() || ''
   if (lang && lang !== 'text' && hljs.getLanguage(lang)) {
     return hljs.highlight(content.value.code, { language: lang }).value
@@ -686,107 +759,89 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-// ---- 搜索 ----
-const searchQuery = ref('')
-const activeMatchIndex = ref(0)
-const matchCount = ref(0)
-const searchInputRef = ref<HTMLInputElement | null>(null)
+// ---- 查找 ----
+// 两种视图：CodeMirror 编辑态走它自带的中文面板；其余（Markdown 预览、只读代码、docx）走 DOM 文本标记搜索。
+// 标记/计数/跳转逻辑抽在 useDomSearch 里，聊天区也复用同一个 composable。
 
-function escapeRegExp(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+/** 当前 DOM 搜索要作用的容器：docx 文档用 docRenderRef；Markdown 预览/只读代码用 renderRef */
+function domSearchRoot(): HTMLElement | null {
+  if (content.value?.document) return docRenderRef.value
+  if (mdPreviewMode.value || !content.value?.editable) return renderRef.value
+  return null
 }
 
-function applyMarks() {
-  const el = renderRef.value
-  // 可编辑模式由 CodeMirror 的 search 扩展负责，不走 DOM mark
-  if (!el || content.value?.editable) return
-  // 代码模式下 v-html 已渲染，需要重新写入以清除旧 mark
-  if (!store.activeFile?.asMarkdown) {
-    el.innerHTML = renderedHtml.value
-  }
-  const query = searchQuery.value.trim()
-  if (!query) { matchCount.value = 0; return }
-  const regex = new RegExp(escapeRegExp(query), 'gi')
-  const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT)
-  const textNodes: Text[] = []
-  let n: Node | null
-  while ((n = walker.nextNode())) textNodes.push(n as Text)
-  for (const tn of textNodes) {
-    const text = tn.textContent || ''
-    regex.lastIndex = 0
-    const hits: { s: number; e: number }[] = []
-    let m: RegExpExecArray | null
-    while ((m = regex.exec(text))) hits.push({ s: m.index, e: m.index + m[0].length })
-    if (!hits.length) continue
-    const frag = document.createDocumentFragment()
-    let last = 0
-    for (const h of hits) {
-      if (h.s > last) frag.appendChild(document.createTextNode(text.slice(last, h.s)))
-      const mark = document.createElement('mark')
-      mark.className = 'code-search-hit'
-      mark.textContent = text.slice(h.s, h.e)
-      frag.appendChild(mark)
-      last = h.e
-    }
-    if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
-    tn.parentNode!.replaceChild(frag, tn)
-  }
-  matchCount.value = el.querySelectorAll('mark.code-search-hit').length
-  syncActive()
+const {
+  open: domSearchOpen,
+  query: searchQuery,
+  inputRef: domSearchInputRef,
+  matchCount,
+  label: activeMatchLabel,
+  openSearch: openDomSearchRaw,
+  closeSearch: closeDomSearchRaw,
+  reset: resetDomSearch,
+  applyMarks,
+  goNext: jumpToNextMatch,
+  goPrev: jumpToPrevMatch,
+} = useDomSearch(domSearchRoot)
+
+function openDomSearch(prefill?: string) {
+  if (!canSearchFile.value || codeEditorMode.value) return
+  openDomSearchRaw(prefill)
 }
 
-const activeMatchLabel = computed(() => {
-  if (!matchCount.value) return searchQuery.value.trim() ? '0/0' : ''
-  return `${activeMatchIndex.value + 1}/${matchCount.value}`
-})
-
-function syncActive() {
-  const el = renderRef.value
-  if (!el) return
-  const marks = el.querySelectorAll('mark.code-search-hit')
-  marks.forEach((m, i) => m.classList.toggle('is-active', i === activeMatchIndex.value))
-  ;(marks[activeMatchIndex.value] as HTMLElement | undefined)?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+function closeDomSearch() {
+  closeDomSearchRaw()
 }
 
-function jumpToNextMatch() {
-  if (!matchCount.value) return
-  activeMatchIndex.value = (activeMatchIndex.value + 1) % matchCount.value
-}
-
-function jumpToPrevMatch() {
-  if (!matchCount.value) return
-  activeMatchIndex.value = (activeMatchIndex.value - 1 + matchCount.value) % matchCount.value
-}
-
-// 下标变化时同步视图：可编辑模式交给 CodeMirror 定位，只读模式切换 mark 高亮
-watch(activeMatchIndex, () => {
-  if (content.value?.editable) {
-    codeEditorRef.value?.gotoMatchIndex(activeMatchIndex.value)
+/** 工具栏查找按钮 / Ctrl+F 的统一入口：CodeMirror 视图开它的面板，其余视图展开 DOM 查找条 */
+function openSearch() {
+  if (!canSearchFile.value) return
+  if (codeEditorMode.value) {
+    codeEditorRef.value?.openSearch()
     return
   }
-  syncActive()
+  openDomSearch(searchPrefill())
+}
+
+/** 当前选区文本清洗成查找预填词（压成单行、限长）。DOM 视图的选区就是 window 选区 */
+function searchPrefill(): string {
+  const text = (window.getSelection()?.toString() ?? '').trim().replace(/\s+/g, ' ')
+  return text.length <= 80 ? text : ''
+}
+
+// 文件切换：收起查找并清理上一文件的高亮
+watch(() => store.activePath, () => {
+  resetDomSearch()
 })
 
-// 搜索词变化：可编辑模式同步给 CodeMirror，由其返回匹配数
-watch(searchQuery, async (query, prev) => {
-  activeMatchIndex.value = 0
-  if (content.value?.editable) {
-    if (query.trim() === prev?.trim()) return
-    matchCount.value = query.trim() ? (codeEditorRef.value?.search(query.trim()) ?? 0) : 0
-    return
-  }
-  await nextTick()
-  applyMarks()
+// 代码内容或文档内容变化：查找条开着时重新标记
+watch(() => content.value?.code, () => {
+  if (domSearchOpen.value) void nextTick(applyMarks)
 })
-watch(() => store.activePath, async () => {
-  searchQuery.value = ''
-  activeMatchIndex.value = 0
-  matchCount.value = 0
-  await nextTick()
-  applyMarks()
-  searchInputRef.value?.focus()
+watch(docBuffer, () => {
+  if (domSearchOpen.value) void nextTick(applyMarks)
 })
-watch(() => content.value?.code, async () => { await nextTick(); applyMarks() })
+
+// 切到 CodeMirror 编辑态时 DOM 查找条让位（CM 有自己的面板）
+watch(codeEditorMode, (isCm) => {
+  if (isCm && domSearchOpen.value) closeDomSearch()
+})
+
+// desktop（pywebview/WebView2）里焦点不在 CodeMirror 时 Ctrl+F 无人接管，这里统一路由；
+// 浏览器模式不拦：让浏览器原生查找页面对付普通 DOM
+function onEditorSearchKeydown(e: KeyboardEvent) {
+  if (!desktopStore.isDesktop || !(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'f') return
+  const target = e.target as HTMLElement | null
+  // 已经在 DOM 查找框里输入时，交给浏览器默认行为（全选框内文字）
+  if (target?.classList.contains('editor-search-input')) return
+  // 不劫持面板外（聊天输入框等）的 Ctrl+F；焦点在 body（点过预览区）时按最近点击区域仲裁
+  const inPane = !!target?.closest('.file-editor-pane')
+    || (target === document.body && document.body.dataset.searchPane === 'file')
+  if (!inPane) return
+  if (!canSearchFile.value) return
+  e.preventDefault()
+  openSearch()
+}
 
 // ---- 跳行定位 ----
 const jumpFlash = ref(false)
@@ -800,12 +855,13 @@ async function applyJumpLine() {
   const line = store.jumpLine
   const c = content.value
   if (line <= 0 || !c?.code) return
-  // Markdown 是渲染后的排版，行号与源码行不对应；图片/文档/二进制无代码区，均只清空请求
-  if (c.image || c.document || c.binary || store.activeFile?.asMarkdown) {
+  // Markdown 预览是渲染后的排版，行号与源码行不对应；图片/文档/二进制无代码区，均只清空请求
+  // （md 切到编辑态后行号即源码行号，落到下面的 CodeMirror 分支正常定位）
+  if (c.image || c.document || c.binary || mdPreviewMode.value) {
     store.consumeJumpLine()
     return
   }
-  // 可编辑模式：交给 CodeMirror 原生滚动定位
+  // CodeMirror 模式：交给它原生滚动定位
   if (c.editable) {
     codeEditorRef.value?.jumpToLine(line)
     store.consumeJumpLine()
@@ -999,7 +1055,7 @@ function handleContextMenu(e: MouseEvent) {
 
 function openCodeMenu(e: MouseEvent) {
   const MENU_W = 176
-  const MENU_H = store.activeFile?.sourcePath && !store.activeFile?.asMarkdown ? 116 : 44
+  const MENU_H = store.activeFile?.sourcePath && !mdPreviewMode.value ? 116 : 44
   menuX.value = Math.min(e.clientX, window.innerWidth - MENU_W - 8)
   menuY.value = Math.min(e.clientY, window.innerHeight - MENU_H - 8)
   menuVisible.value = true
@@ -1063,6 +1119,11 @@ async function copyLineRefWithContent() {
 
 function onDocumentPointerDown(e: MouseEvent) {
   const target = e.target
+  // 记录最近点击的区域，供焦点为 body 时仲裁 Ctrl+F 归聊天区还是文件区
+  if (target instanceof Node && target.nodeType === Node.ELEMENT_NODE
+    && (target as HTMLElement).closest('.file-editor-pane')) {
+    document.body.dataset.searchPane = 'file'
+  }
   const insideCodeMenu = !!menuEl.value && target instanceof Node && menuEl.value.contains(target)
   if (!insideCodeMenu) closeMenu()
   // 两套菜单各自判断，避免其中一个命中就漏关另一个
@@ -1096,6 +1157,7 @@ onMounted(() => {
   document.addEventListener('pointerdown', onDocumentPointerDown)
   document.addEventListener('keydown', onDocumentKeydown)
   window.addEventListener('resize', onWindowResize)
+  window.addEventListener('keydown', onEditorSearchKeydown, true)
   contentWrapRef.value?.addEventListener('contextmenu', handleContextMenu)
   void nextTick(syncTabScrollState)
 })
@@ -1103,6 +1165,7 @@ onBeforeUnmount(() => {
   document.removeEventListener('pointerdown', onDocumentPointerDown)
   document.removeEventListener('keydown', onDocumentKeydown)
   window.removeEventListener('resize', onWindowResize)
+  window.removeEventListener('keydown', onEditorSearchKeydown, true)
   contentWrapRef.value?.removeEventListener('contextmenu', handleContextMenu)
   tabBarObserver?.disconnect()
   clearTimeout(jumpFlashTimer)
@@ -1554,6 +1617,35 @@ watch(contentWrapRef, (el, prev) => {
   flex-shrink: 0;
 }
 
+/* 工具栏查找按钮 */
+.editor-search-toggle-btn {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid var(--el-border-color-lighter);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--el-text-color-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s, color 0.12s;
+}
+.editor-search-toggle-btn:hover { background: var(--el-fill-color); color: var(--el-text-color-primary); }
+.editor-search-toggle-btn svg { width: 13px; height: 13px; }
+
+/* DOM 查找条（Markdown 预览 / 只读代码 / docx 等） */
+.editor-domsearch-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--el-border-color-lighter);
+  background: var(--el-bg-color);
+  flex-shrink: 0;
+}
+
 .editor-search-input {
   flex: 1;
   min-width: 0;
@@ -1576,7 +1668,7 @@ watch(contentWrapRef, (el, prev) => {
   gap: 3px;
   flex-shrink: 0;
 }
-.editor-search-count { min-width: 32px; font-size: 11px; color: var(--el-text-color-secondary); text-align: right; }
+.editor-search-count { min-width: 40px; font-size: 11px; color: var(--el-text-color-secondary); text-align: right; font-variant-numeric: tabular-nums; }
 .editor-search-btn {
   width: 22px; height: 22px;
   border: 1px solid var(--el-border-color-lighter);
@@ -1605,6 +1697,42 @@ watch(contentWrapRef, (el, prev) => {
   transition: background 0.12s, color 0.12s;
 }
 .editor-copy-btn:hover { background: var(--el-fill-color); color: var(--el-text-color-primary); }
+
+/* Markdown 预览/编辑切换：双段胶囊，选中段为实底翠绿 */
+.editor-md-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid color-mix(in srgb, #10b981 45%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, #10b981 12%, transparent);
+  flex-shrink: 0;
+}
+
+.editor-md-toggle-btn {
+  padding: 2px 9px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: #059669;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 16px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.editor-md-toggle-btn:hover:not(.is-active) {
+  background: color-mix(in srgb, #10b981 22%, transparent);
+  color: #047857;
+}
+
+.editor-md-toggle-btn.is-active {
+  background: linear-gradient(135deg, #059669, #10b981);
+  color: #fff;
+  box-shadow: 0 1px 6px rgba(5, 150, 105, 0.35);
+}
 
 /* 保存按钮：翠绿实底，与文件区色相一致 */
 .editor-save-btn {
@@ -1918,16 +2046,20 @@ watch(contentWrapRef, (el, prev) => {
   line-height: 1.7;
 }
 
+/* DOM 查找命中：只读代码 / Markdown 预览 / docx·xlsx·pptx 文档容器共用 */
 .editor-pre :deep(.code-search-hit),
-.editor-markdown :deep(.code-search-hit) {
-  background: rgba(250, 204, 21, 0.35);
+.editor-markdown :deep(.code-search-hit),
+.editor-document :deep(.code-search-hit) {
+  background: rgba(56, 189, 248, 0.28);
   color: inherit;
   padding: 1px 0;
   border-radius: 2px;
 }
 .editor-pre :deep(.code-search-hit.is-active),
-.editor-markdown :deep(.code-search-hit.is-active) {
-  background: rgba(245, 158, 11, 0.78);
+.editor-markdown :deep(.code-search-hit.is-active),
+.editor-document :deep(.code-search-hit.is-active) {
+  background: rgba(56, 189, 248, 0.6);
+  outline: 1px solid #38bdf8;
 }
 
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }

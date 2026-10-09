@@ -880,6 +880,46 @@ html.dark[data-md-theme="night-ink"] .markdown-body {
   margin-bottom: 0;
 }
 
+/* YAML frontmatter（文件头的 --- 块）：渲染成元信息卡片，不参与正文排版 */
+.markdown-body .md-frontmatter {
+  margin: 0 0 1.15em;
+  padding: 0.6em 0.8em;
+  border: 1px solid var(--md-border-soft);
+  border-left: 3px solid var(--md-accent);
+  border-radius: 12px;
+  background: var(--md-soft);
+  font-size: 0.9em;
+}
+
+.markdown-body .md-frontmatter-row {
+  display: flex;
+  gap: 0.7em;
+  padding: 0.24em 0;
+  line-height: 1.55;
+}
+
+.markdown-body .md-frontmatter-row + .md-frontmatter-row {
+  border-top: 1px dashed var(--md-border-soft);
+}
+
+.markdown-body .md-frontmatter-key {
+  flex: 0 0 auto;
+  min-width: 6.5em;
+  color: var(--md-accent);
+  font-family: 'Cascadia Code', 'JetBrains Mono', 'SFMono-Regular', Consolas, monospace;
+  font-size: 0.94em;
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.markdown-body .md-frontmatter-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--md-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Headings */
 .markdown-body h1,
 .markdown-body h2,
