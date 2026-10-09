@@ -15,12 +15,14 @@ from lc_agent.tools.system_tools._config import get_command_config
 # ---------------------------------------------------------------------------
 
 class _ProcessEntry:
-    __slots__ = ("proc", "stdout_buf", "stderr_buf", "start_time", "command", "_lock")
+    __slots__ = ("proc", "stdout_buf", "stderr_buf", "stream_buf", "start_time", "command", "_lock")
 
     def __init__(self, proc: subprocess.Popen, command: str):
         self.proc = proc
         self.stdout_buf: list[str] = []
         self.stderr_buf: list[str] = []
+        # stdout and stderr merged in arrival order for live streaming.
+        self.stream_buf: list[str] = []
         self.start_time = time.time()
         self.command = command
         self._lock = threading.Lock()
@@ -28,10 +30,12 @@ class _ProcessEntry:
     def append_stdout(self, line: str):
         with self._lock:
             self.stdout_buf.append(line)
+            self.stream_buf.append(line)
 
     def append_stderr(self, line: str):
         with self._lock:
             self.stderr_buf.append(line)
+            self.stream_buf.append(line)
 
     def get_output(self, offset: int = 0) -> tuple[str, int]:
         """Return buffered output from offset. Returns (text, new_offset)."""
@@ -229,6 +233,9 @@ def run_command(
 
     stdout_lines: list[str] = []
     stderr_lines: list[str] = []
+    # stdout and stderr merged in arrival order for live streaming.
+    stream_lines: list[str] = []
+    buf_lock = threading.Lock()
     timed_out = False
     stdout_done = threading.Event()
     _stdout = proc.stdout
@@ -241,7 +248,9 @@ def run_command(
             for line in iter(_stdout.readline, ""):
                 if not line:
                     break
-                stdout_lines.append(line)
+                with buf_lock:
+                    stdout_lines.append(line)
+                    stream_lines.append(line)
         except (ValueError, OSError):
             pass
         finally:
@@ -256,7 +265,9 @@ def run_command(
             for line in iter(_stderr.readline, ""):
                 if not line:
                     break
-                stderr_lines.append(line)
+                with buf_lock:
+                    stderr_lines.append(line)
+                    stream_lines.append(line)
         except (ValueError, OSError):
             pass
         finally:
@@ -275,18 +286,21 @@ def run_command(
     poll_interval = 0.2
 
     while not stdout_done.wait(timeout=poll_interval):
-        new_len = len(stdout_lines)
-        if new_len > last_emitted_len:
-            for line in stdout_lines[last_emitted_len:new_len]:
-                _emit_output_chunk(line)
-            last_emitted_len = new_len
+        with buf_lock:
+            pending = stream_lines[last_emitted_len:]
+        if pending:
+            _emit_output_chunk("".join(pending))
+            last_emitted_len += len(pending)
         if time.time() >= deadline:
             timed_out = True
             proc.kill()
             break
 
-    for line in stdout_lines[last_emitted_len:]:
-        _emit_output_chunk(line)
+    with buf_lock:
+        pending = stream_lines[last_emitted_len:]
+    if pending:
+        _emit_output_chunk("".join(pending))
+    last_emitted_len += len(pending)
 
     if not timed_out:
         try:
@@ -307,6 +321,12 @@ def run_command(
 
     stdout_thread.join(timeout=3)
     stderr_thread.join(timeout=3)
+
+    with buf_lock:
+        pending = stream_lines[last_emitted_len:]
+    if pending:
+        _emit_output_chunk("".join(pending))
+
     elapsed_ms = int((time.time() - start) * 1000)
 
     if timed_out:
@@ -522,15 +542,19 @@ def start_background_process(
     while time.time() < deadline:
         time.sleep(poll_interval)
         with entry._lock:
-            current_len = len(entry.stdout_buf)
-        if current_len > last_emitted_len:
-            new_lines = entry.stdout_buf[last_emitted_len:current_len]
-            for line in new_lines:
-                _emit_output_chunk(line)
+            current_len = len(entry.stream_buf)
+            new_lines = entry.stream_buf[last_emitted_len:current_len]
+        if new_lines:
+            _emit_output_chunk("".join(new_lines))
             last_emitted_len = current_len
         if proc.poll() is not None:
             time.sleep(0.3)
             break
+
+    with entry._lock:
+        new_lines = entry.stream_buf[last_emitted_len:]
+    if new_lines:
+        _emit_output_chunk("".join(new_lines))
 
     initial_output = entry.get_full_output()
     is_running = proc.poll() is None

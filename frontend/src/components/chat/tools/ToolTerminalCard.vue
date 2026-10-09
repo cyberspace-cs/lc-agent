@@ -146,6 +146,10 @@ const headerTitle = computed(() => {
   if (name.endsWith('__list_all_processes') || name.endsWith('__list_agent_started_processes')) {
     return '进程列表'
   }
+  if (name === 'skill__execute_script') {
+    const skill = (props.toolCall.args as any)?.skill_name
+    return `运行技能脚本${skill ? ` · ${skill}` : ''}`
+  }
   return shortCommand(cmd) || name
 })
 
@@ -166,9 +170,45 @@ function normalizeResult(value?: string): string {
   return value.replace(/\\u3000/g, '　').replace(/\\n/g, '\n')
 }
 
+// skill__execute_script 返回 "exit_code: N\nduration_ms: N\n\nstdout:\n..\n\nstderr:\n.."，
+// 这里转成 run_command 的 "正文 + [stderr] 段 + [exit_code=N, duration=Nms]" 形式，
+// 复用下面的输出渲染与退出码解析逻辑。
+function fromSkillResult(text: string): string {
+  const head = text.match(/^exit_code:\s*(-?\d+|None)\s*\nduration_ms:\s*(\d+)\s*\n/)
+  if (!head) return text
+  let rest = text.slice(head[0].length)
+  let timedOut = false
+  if (rest.startsWith('timed_out: true\n')) {
+    timedOut = true
+    rest = rest.slice('timed_out: true\n'.length)
+  }
+  const stdoutIdx = rest.indexOf('stdout:\n')
+  if (stdoutIdx < 0) return text
+  rest = rest.slice(stdoutIdx + 'stdout:\n'.length)
+  let stdoutBody = rest
+  let stderrBody = ''
+  const stderrIdx = rest.indexOf('\n\nstderr:\n')
+  if (stderrIdx >= 0) {
+    stdoutBody = rest.slice(0, stderrIdx)
+    stderrBody = rest.slice(stderrIdx + '\n\nstderr:\n'.length)
+  }
+  stdoutBody = stdoutBody.replace(/\n+$/, '')
+  stderrBody = stderrBody.replace(/\n+$/, '')
+  const code = head[1] === 'None' ? -1 : Number(head[1])
+  const parts: string[] = []
+  if (stdoutBody) parts.push(stdoutBody)
+  if (stderrBody && stderrBody !== '(empty)') parts.push(`[stderr]\n${stderrBody}`)
+  parts.push(
+    timedOut
+      ? `[Command timed out after ${head[2]}ms, process killed]`
+      : `[exit_code=${code}, duration=${head[2]}ms]`,
+  )
+  return parts.join('\n\n')
+}
+
 const rawOutput = computed(() => {
   const tc = props.toolCall
-  const text = normalizeResult(tc.streamingOutput || tc.result || '')
+  const text = fromSkillResult(normalizeResult(tc.streamingOutput || tc.result || ''))
   // 后台进程返回头 "PID:..\nStatus:..\nCommand:..\n---\n正文"：只显示正文
   const sepIdx = text.indexOf('\n---\n')
   if ((toolName.value.endsWith('__start_background_process') || toolName.value.endsWith('__read_process_output'))

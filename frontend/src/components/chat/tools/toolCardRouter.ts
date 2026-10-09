@@ -37,6 +37,7 @@ const TERMINAL_NAMES = new Set([
   'command__kill_process',
   'command__list_all_processes',
   'command__list_agent_started_processes',
+  'skill__execute_script',
 ])
 
 export type ToolCardKind =
